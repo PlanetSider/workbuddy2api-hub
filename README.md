@@ -97,17 +97,26 @@
 自带完整容器配置，零外部依赖，极速启动：
 
 ```bash
-# 1. 后台启动容器 (自动构建并运行)
+# 1. 后台启动容器 (本地自动构建并运行)
 docker compose up -d
 
 # 2. 查看网关日志
 docker compose logs -f
 ```
 
-亦可直接使用 `docker run` 启动：
+亦可直接使用 GHCR 发布的镜像启动：
 ```bash
-docker run -d   --name wb-proxy   --restart unless-stopped   -p 8788:8788   -v $(pwd)/accounts:/app/accounts   -v $(pwd)/usage:/app/usage   -e API_KEY=your_secret_key   $(docker build -q .)
+docker run -d \
+  --name wb-proxy \
+  --restart unless-stopped \
+  -p 8788:8788 \
+  -v $(pwd)/accounts:/app/accounts \
+  -v $(pwd)/usage:/app/usage \
+  -e API_KEY=your_secret_key \
+  ghcr.io/planetsider/workbuddy2api-hub:latest
 ```
+
+镜像发布规则：Pull Request 只构建验证，不发布镜像；推送到 `main` 会发布 `latest` 和提交 SHA 标签；推送 `v*` 版本标签会发布对应版本标签及提交 SHA 标签。GHCR 私有镜像需要先执行 `docker login ghcr.io`。
 
 - **持久化目录**：`./accounts` (账号凭证及活动区域) 与 `./usage` (请求流水与指标快照)；
 - **配置参数**：通过环境变量 `API_KEY`、`PORT` 自定义。
