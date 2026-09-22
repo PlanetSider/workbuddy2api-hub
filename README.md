@@ -94,13 +94,16 @@
 - **模型区域自检防护**：当某个 Key 绑定的出口与其请求的模型不匹配时（例如用国际版 Key 去调国内独占的 `deepseek-v4-pro`），网关会直接返回通俗易懂的 400 校验错误，杜绝上游 WAF 晦涩的拒流报错。
 
 ### 5. Docker 容器化部署 
-自带完整容器配置，零外部依赖，极速启动：
+镜像由 GitHub Actions 构建并发布到 GHCR，本地生产环境只负责拉取和运行：
 
 ```bash
-# 1. 后台启动容器 (本地自动构建并运行)
-docker compose up -d
+# 1. 拉取 GitHub Actions 最近构建的镜像
+docker compose pull
 
-# 2. 查看网关日志
+# 2. 启动容器（不在本地构建）
+docker compose up -d --no-build
+
+# 3. 查看网关日志
 docker compose logs -f
 ```
 

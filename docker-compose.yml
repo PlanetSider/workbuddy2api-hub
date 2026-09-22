@@ -1,7 +1,7 @@
 services:
   wb-proxy:
-    build: .
     image: ghcr.io/planetsider/workbuddy2api-hub:latest
+    pull_policy: always
     container_name: wb-proxy
     restart: unless-stopped
     ports:
