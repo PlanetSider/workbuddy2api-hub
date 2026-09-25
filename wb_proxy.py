@@ -63,13 +63,17 @@ def detect_model_realm(model_id):
         return "intl"
     cn_only = {
         "deepseek-v4-pro", "minimax-m3", "minimax-m2.7", "minimax-m2.5",
-        "glm-5.3-flash", "glm-5.1", "glm-5.0-turbo", "glm-4.6v",
-        "kimi-k3-1", "kimi-k2.8-preview", "kimi-k2.7", "kimi-k2-thinking",
+        "glm-5.1", "glm-5.0-turbo", "glm-4.6v",
+        "kimi-k3-1", "kimi-k2.7", "kimi-k2-thinking",
         "hy3-x", "hy4-preview-dev", "hy4-preview-x"
     }
     if m in cn_only or any(m.startswith(p) for p in ("minimax-", "deepseek-v4-pro")):
         return "cn"
     return CURRENT_REALM
+# glm-5.3-flash was listed as cn-only, but the international exit serves it:
+# an official intl account posting to www.workbuddy.ai gets HTTP 200, and the
+# intl desktop client ships it in its own model list. Only deepseek-v4-pro
+# still answers "service info not found" there.
 # Models that exist on one side only. Everything else (deepseek-v4.1-flash,
 # hy3, glm-5.3 ...) is served by both exits, so it must not be treated as a
 # conflict.
@@ -80,8 +84,8 @@ INTL_EXCLUSIVE = {
     "gpt-5.5", "gpt-5.4", "gpt-5.3-codex", "gemini-3.5-flash",
 }
 CN_EXCLUSIVE = {
-    "deepseek-v4-pro", "glm-5.3-flash", "glm-5.1", "glm-5v-turbo",
-    "kimi-k3-1", "kimi-k2.8-preview", "kimi-k2.7", "minimax-m3",
+    "deepseek-v4-pro", "glm-5.1", "glm-5v-turbo",
+    "kimi-k3-1", "kimi-k2.7", "minimax-m3",
     "hy3-x", "hy4-preview-dev", "hy4-preview-x",
 }
 def exclusive_realm(model_id):
@@ -1327,10 +1331,11 @@ def runtime_settings_view():
         "api_key_masked": masked,
         "auth_required": auth_required(),
         "api_keys": keys,
+        "reserve_credits": wb_settings.reserve_credits(ACCOUNTS_DIR),
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
         "settings_file": wb_settings.settings_path(ACCOUNTS_DIR),
-        "version": "1.5.4",
+        "version": "1.5.8",
     }
 def current_account():
     """Account used for display purposes (health / usage summaries)."""
@@ -1510,22 +1515,22 @@ CN_UI_ORDER = [
     "deepseek-v4-pro",
 ]
 INTL_UI_ORDER = [
+    "hy4-preview-f",
+    "hy3",
     "deepseek-v4.1-flash",
     "gpt-6-astra",
-    "hy4-preview-f",
-    "hy4-preview",
-    "hy3",
     "gpt-5.6-sol",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
     "gpt-5.5",
     "gpt-5.4",
-    "gpt-5.3-codex",
     "gemini-3.5-flash",
+    "glm-5.3-flash",
     "glm-5.3",
     "glm-5.2",
     "kimi-k3",
     "kimi-k2.6",
+    "kimi-k2.8-preview",
 ]
 def merge_catalog(primary, realm=None):
     r = realm or CURRENT_REALM
@@ -2142,16 +2147,31 @@ def normalize_tool_choice(obj):
     if isinstance(tc, str):
         val = tc.strip().lower()
         if val == "none":
-            obj.pop("tool_choice", None)
-            obj.pop("tools", None)
-            obj.pop("functions", None)
+            # 这里曾经把 tools/functions 一起删掉，那正是 Agent 死循环的成因：
+            # 工具声明没了，模型拿不到函数签名、又没有结构化工具通道，却仍被要求
+            # 完成任务，于是把调用降级成 DSML / 伪 JSON 文本塞进 content
+            # （tool_calls 为空、finish_reason=stop）。客户端解析不到调用只能再
+            # 追问一轮，模型又重复一遍 "I'll do it"，上下文每轮 +2 条消息、token
+            # 线性膨胀，直到撑爆窗口或用户手动断开。
+            #
+            # tool_choice="none" 的语义是「本轮不许调用工具」，这层意思由
+            # tool_choice 字段本身表达就够了，不需要抹掉能力声明。
+            # 上游把 tool_choice 声明为 string（发对象会 11101），所以保持字符串
+            # 原样透传，同时保留 tools。
+            #
+            # 取舍：实测本上游并不真正遵守 tool_choice="none"（保留 tools 后它
+            # 仍返回 tool_calls）。但对比两条路 —— 删 tools 会让模型输出不可解析
+            # 的文本、Agent 原地空转；留 tools 则走正常 tool_calls 通道，客户端能
+            # 正常执行与回填 —— 后者明显更好。确实需要禁止调用时，客户端不传
+            # tools 即可。
+            obj["tool_choice"] = "none"
         return
     if isinstance(tc, dict):
         typ = (tc.get("type") or "").strip().lower()
         if typ == "none":
-            obj.pop("tool_choice", None)
-            obj.pop("tools", None)
-            obj.pop("functions", None)
+            # 同上：保留 tools 声明。上游只认字符串，对象形式必须降级成
+            # "none"，否则 11101。
+            obj["tool_choice"] = "none"
         elif typ in ("auto", "required"):
             obj["tool_choice"] = typ
         elif typ == "function":
@@ -2570,8 +2590,13 @@ def _try_switch_product(account, model):
     count = _switch_count(account, model)
     if count >= MAX_PRODUCT_SWITCHES:
         return False
-    current = getattr(account, "product", "cli")
-    target = "workbuddy" if current == "cli" else "cli"
+    current = getattr(account, "product", wb_identity.PRODUCT_DESKTOP)
+    if current == wb_identity.PRODUCT_DESKTOP:
+        target = wb_identity.PRODUCT_VSCODE
+    elif current == wb_identity.PRODUCT_VSCODE:
+        target = wb_identity.PRODUCT_CLI
+    else:
+        target = wb_identity.PRODUCT_DESKTOP
     try:
         changed = account.set_product(target)
     except Exception as exc:
@@ -4092,7 +4117,7 @@ class Handler(BaseHTTPRequestHandler):
             super().finish()
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             pass
-    server_version = "wb-proxy/1.5.4"
+    server_version = "wb-proxy/1.5.8"
     def log_message(self, fmt, *args):
         # 静默过滤前端看板高频定时心跳的正常 200 GET 请求（/logs、/usage、/accounts 轮询等）
         # 避免自增死循环刷屏与日志污染。遇 4xx/5xx 异常或所有非 GET 业务操作依然如实记录。
@@ -4531,7 +4556,7 @@ class Handler(BaseHTTPRequestHandler):
             "realm": CURRENT_REALM,
             "accounts": len(POOL.accounts) if POOL else 0,
             "accounts_ready": POOL.count_ready() if POOL else 0,
-            "api_key_required": bool(API_KEY),
+            "api_key_required": auth_required(),
         }
         if self._key_ok():
             info.update({
@@ -4896,6 +4921,19 @@ class Handler(BaseHTTPRequestHandler):
         if "auth_disabled" in payload:
             wb_settings.set_auth_disabled(ACCOUNTS_DIR, payload.get("auth_disabled"))
             reply["auth_disabled"] = bool(payload.get("auth_disabled"))
+        if "reserve_credits" in payload:
+            try:
+                reserve = int(payload.get("reserve_credits"))
+            except (TypeError, ValueError):
+                return self._error(400, "reserve_credits must be a whole number",
+                                   "invalid_request_error")
+            if reserve < 0:
+                return self._error(400, "reserve_credits cannot be negative",
+                                   "invalid_request_error")
+            wb_settings.set_reserve_credits(ACCOUNTS_DIR, reserve)
+            if POOL:
+                POOL.apply_reserve_credits(reserve)
+            reply["reserve_credits"] = reserve
         new_key = payload.get("api_key")
         if new_key is not None:
             new_key = str(new_key).strip()
@@ -5077,7 +5115,7 @@ class Handler(BaseHTTPRequestHandler):
         realm = payload.get("realm")
 
         if target not in wb_identity.VALID_PRODUCTS:
-            return self._error(400, "product must be 'cli' or 'workbuddy'",
+            return self._error(400, "product must be 'workbuddy', 'vscode', or 'cli'",
                                "invalid_request_error")
 
         if uid:
@@ -5947,6 +5985,7 @@ def _bootstrap_runtime(args):
     POOL = wb_accounts.AccountPool(ACCOUNTS_DIR, log=log)
     POOL.load()
     POOL.apply_proxy_slots()
+    POOL.apply_reserve_credits()
     load_persisted_realm()
     global SCHEDULER
     from wb_scheduler import Scheduler
